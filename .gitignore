@@ -1,0 +1,5 @@
+# 錄製輸出：有 MAC 位址、IP 和一次性帳號密碼
+captures/
+__pycache__/
+*.pyc
+.DS_Store
