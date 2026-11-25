@@ -19,8 +19,10 @@ import argparse
 import http.cookiejar
 import os
 import plistlib
+import pty
 import random
 import re
+import select
 import socket
 import ssl
 import struct
@@ -40,6 +42,8 @@ DEFAULT_SSIDS = ["TyMetro-train"]
 TIMEOUT = 15
 IP_BOUND_IF = 25  # <netinet/in.h>：socket 只走指定網卡
 
+SESSION = 30 * 60  # 入口頁寫明看完廣告可用 30 分鐘
+WATCH_KEYS = ("IPv4", "CaptiveNetwork")  # 常駐模式訂閱的 State:/Network/Interface/<網卡>/ 底下的 key
 RUNS_DIR = os.path.expanduser("~/Library/Caches/tymetro-wifi-autologin/runs")
 
 IFACE = "en0"  # main() 會換成實際的 Wi-Fi 網卡
@@ -321,10 +325,11 @@ def new_run_dir():
 
 
 def watch_check():
+    """需要登入就登入。回傳 True 表示這次有登入，False 表示本來就能上網。"""
     global DUMP
     online, start = wait_for_network(30)
     if online:
-        return
+        return False
     if not start:
         raise LoginError("偵測頁沒有被轉到登入頁")
     DUMP = new_run_dir()
@@ -336,27 +341,62 @@ def watch_check():
             raise LoginError("送出開通後仍然上不了網")
     finally:
         DUMP = None
+    return True
+
+
+def network_events():
+    """訂閱 Wi-Fi 的 IPv4（連上、斷線、換網路）和 CaptiveNetwork（macOS 偵測到要登入）變化。
+    scutil 輸出到 pipe 時會整塊緩衝，通知不會即時送出，所以把它的輸出接在 pty 上。"""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(["/usr/sbin/scutil"], stdin=subprocess.PIPE, stdout=slave, stderr=slave, text=True)
+    os.close(slave)
+    keys = "".join(f"n.add State:/Network/Interface/{IFACE}/{k}\n" for k in WATCH_KEYS)
+    proc.stdin.write(keys + "n.watch\n")
+    proc.stdin.flush()
+    return proc, master
+
+
+def wait_event(fd, timeout):
+    """睡到網路有變化（回傳 True）或逾時（False）。一次變化常連發好幾個通知，多等 1 秒一起讀掉。"""
+    ready = select.select([fd], [], [], timeout)[0]
+    if not ready:
+        return False
+    while ready:
+        if not os.read(fd, 4096):
+            raise OSError("scutil 結束了")
+        ready = select.select([fd], [], [], 1)[0]
+    return True
 
 
 def watch(ssids):
+    """平常停在 select() 不耗 CPU，只有網路事件或計時器到了才醒來。
+    計時器只在目標 Wi-Fi 上才設：登入後睡到 30 分鐘到期，之後每 20 秒看一次，直到重登。"""
     targets = {s.lower() for s in ssids}
+    proc, events = network_events()
     log(f"常駐中（網卡 {IFACE}），目標 Wi-Fi：{', '.join(ssids)}")
-    last, next_check = None, 0.0
+    last_ssid, login_at, timer = None, None, 0.0  # timer：下次檢查的時間，None 表示等網路事件就好
+
     while True:
-        ssid = current_ssid()
-        hit = bool(ssid) and ssid.lower() in targets
-        if ssid != last:
-            if hit:
-                log(f"連上 {ssid}")
-            last, next_check = ssid, 0.0
-        if hit and time.time() >= next_check:
-            try:
-                watch_check()
-                next_check = time.time() + 60
-            except (LoginError, urllib.error.URLError, OSError) as e:
-                log(f"失敗：{e}，30 秒後再試")
-                next_check = time.time() + 30
-        time.sleep(5)
+        if timer is not None and time.time() >= timer:
+            ssid = current_ssid()
+            if not (ssid and ssid.lower() in targets):
+                last_ssid, login_at, timer = ssid, None, None
+            else:
+                if ssid != last_ssid:
+                    log(f"連上 {ssid}")
+                    last_ssid = ssid
+                try:
+                    if watch_check():
+                        login_at = time.time()
+                    if login_at and time.time() < login_at + SESSION:
+                        timer = login_at + SESSION + 5
+                    else:
+                        timer = time.time() + (20 if login_at else 60)
+                except (LoginError, urllib.error.URLError, OSError) as e:
+                    log(f"失敗：{e}，30 秒後再試")
+                    timer = time.time() + 30
+        if wait_event(events, None if timer is None else max(0.0, timer - time.time())):
+            timer = 0.0
 
 
 def status():

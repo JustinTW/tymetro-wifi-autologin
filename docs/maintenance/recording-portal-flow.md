@@ -81,7 +81,7 @@ tools/extract_flow.py captures/<時間>/stream.log --redact   # 要寫進文件�
 | 10 | 開通 | POST `auth_page.php`（`username`、`password`、`client_ip`、`gwip`、`umac`、`vlanid`、`nasid`、`gwmac`、`cid`、`SerID`） | 302 → `http://wifiplususer.cht.com.tw/mbr/InetService_open.jsp?code=0&msg=Login+success` | `code=0` 才算成功 |
 | 11 | 確認 | 再打一次偵測頁 | 200 `Success` | |
 
-入口頁寫明一次只給 30 分鐘；常駐模式每 60 秒檢查一次，到期就重登。
+入口頁寫明一次只給 30 分鐘。常駐模式在登入後睡到 30 分鐘到期，之後每 20 秒檢查一次，直到重登（見 `watch()`）。
 
 ## 5. 已知的坑
 
@@ -93,5 +93,6 @@ tools/extract_flow.py captures/<時間>/stream.log --redact   # 要寫進文件�
 - **HSTS。** `wifiad2.cht.com.tw` 送 `Strict-Transport-Security: …; includeSubdomains; preload`，登入視窗實際上也把 http 自動升成 https 了（錄到的網址都是 http 後面緊接著 https）。轉址的 `Location` 常常寫 http，script 跟瀏覽器一樣改成 https。
 - **User-Agent。** 閘道看到 macOS 偵測器的 UA（`CaptiveNetworkSupport-… wispr`）會回 WISPr XML，不會轉址。一定要用瀏覽器 UA。
 - **剛連上 Wi-Fi 的前幾秒還沒有 IP 或 DNS。** `wait_for_network()` 會重試 45 秒。
+- **scutil 的變化通知要接在 pty 上。** `scutil` 的 `n.watch` 輸出到 pipe 時會整塊緩衝，通知不會即時送出，所以 `network_events()` 用 `pty.openpty()`。一般使用者不能在 `State:` 底下發布測試用的 key（`Permission denied`），要測事件迴圈，可以暫時把 `WATCH_KEYS` 加上比較常變動的 `AirPort`。
 - **錄製相關。** zsh 有內建的 `log` 指令，要寫 `/usr/bin/log`。登入視窗載入的網址（`Probe request prepared for … URL:`）、WISPr 解析結果都是 debug 等級，只有 `log stream --level debug` 即時錄得到，事後 `log show` 看不到。
 - **11/20 的空白登入視窗**：原因沒查到，當時的紀錄沒有 WebKit 細節。之後若再遇到，錄製時 `stream.log` 的 `error` 列應該會有線索。

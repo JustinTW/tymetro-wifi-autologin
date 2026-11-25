@@ -12,7 +12,7 @@ cd ~/workspace/github/JustinTW/tymetro-wifi-autologin
 ./install.sh
 ```
 
-這會裝一個 LaunchAgent，登入 macOS 後就在背景常駐。車站的 `TyMetro` 也要自動登入的話：
+這會裝一個 LaunchAgent，登入 macOS 後就在背景常駐。它平常是睡著的，不耗 CPU，只有 Wi-Fi 連上、斷線或換網路時才會被系統叫醒；在 TyMetro 上登入後，會睡到 30 分鐘到期再起來重登。車站的 `TyMetro` 也要自動登入的話：
 
 ```sh
 ./install.sh --ssid TyMetro-train --ssid TyMetro

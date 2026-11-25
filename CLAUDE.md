@@ -20,13 +20,16 @@ captures/             錄製輸出，不進 git
 
 1. **Wi-Fi 網卡、SSID、DNS**：`wifi_iface()`、`current_ssid()`、`dns_servers()`、`dns_query()`、`resolve()`、`wifi_connection()`
 2. **HTTP**：`make_opener()`、`fetch()`（`--dump` 時把每一步存檔）、`probe()`、`wait_for_network()`
-3. **登入流程與模式**：`login()`（入口網站的每一步，有註解對應文件裡的表格）、`run_once()`、`watch()` / `watch_check()`、`status()`、`main()`
+3. **登入流程與模式**：`login()`（入口網站的每一步，有註解對應文件裡的表格）、`run_once()`、`watch()`（`network_events()`、`wait_event()`、`watch_check()`）、`status()`、`main()`
 
 ## 執行環境
 
 - LaunchAgent label：`io.github.justintw.tymetro-wifi-autologin`，plist 在 `~/Library/LaunchAgents/`，直接執行 repo 裡的 `tymetro_login.py --watch`，所以 `git pull` 後要 `launchctl kickstart -k gui/$UID/io.github.justintw.tymetro-wifi-autologin`（或重跑 `./install.sh`）才會生效
 - 紀錄檔：`~/Library/Logs/tymetro-wifi-autologin.log`
 - 每次登入的流程紀錄：`~/Library/Caches/tymetro-wifi-autologin/runs/<時間>/`（`flow.txt` + 每頁 HTML，留最近 10 份）
+- **常駐模式不輪詢**：`network_events()` 開一個 `scutil` 訂閱 `State:/Network/Interface/<網卡>/IPv4` 和 `.../CaptiveNetwork` 的變化，`watch()` 平常停在 `select()`，只有兩種情況會醒來：
+  - 網路事件（連上、斷線、換網路、macOS 偵測到要登入）：讀 SSID，不是目標 Wi-Fi 就繼續睡，而且不設計時器
+  - 計時器（只在目標 Wi-Fi 上才有）：自己登入後睡到 30 分鐘到期（`SESSION`），之後每 20 秒檢查一次直到重登；不知道何時登入的（例如手動登入）每 60 秒檢查一次；失敗 30 秒後重試
 
 ## 改程式前要知道的
 
