@@ -39,3 +39,7 @@ tail -f ~/Library/Logs/tymetro-wifi-autologin.log
 ## 運作方式
 
 macOS 在登入前不讓一般程式使用這個 Wi-Fi，所以 script 把連線綁在 Wi-Fi 網卡上，DNS 也自己查。接著照入口網站的流程一步一步打，最後送出開通表單。詳細流程和設計理由見 [CLAUDE.md](CLAUDE.md) 和維護文件。
+
+## 授權
+
+MIT，見 [LICENSE](LICENSE)。
