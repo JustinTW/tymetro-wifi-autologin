@@ -42,6 +42,8 @@ captures/             錄製輸出，不進 git
 - **SSID 從 `scutil` 的 `CachedScanRecord` 解出來**，因為 macOS 26 其他地方都遮掉了。
 - **TLS**：`wifiplususer.cht.com.tw` 只接受 `AES128-SHA256`，所以要 `set_ciphers("DEFAULT:@SECLEVEL=1")`；LibreSSL 不認得時就用預設。
 - **User-Agent 要用瀏覽器的**，閘道看到 macOS 偵測器的 UA 會回 WISPr XML，不會轉址。
+- **VPN 會讓 script 和其他程式看到不同的網路。** script 綁著 Wi-Fi 網卡，VPN（例如 Happ 的 TUN 模式 `utun5`、`198.18.0.1`）接管系統流量時，script 判定「可以上網」，一般程式卻不通。所以檢查紀錄會附上 `default_route_iface()`，走 `utun` 時跳通知。
+- **macOS 的系統 DNS（`getaddrinfo`）沒有逾時**，VPN 開著時實測卡過 8.5 分鐘。一律用 `system_resolve()`（thread 限時 3 秒），不要直接呼叫 `socket.getaddrinfo`。整個登入另外有 `LOGIN_TIMEOUT`（120 秒）上限，由 `fetch()` 檢查。
 - 其他細節（HSTS、手機熱點、WISPr、錄製的坑）在 `docs/maintenance/recording-portal-flow.md` 第 5 節。
 
 ## 慣例

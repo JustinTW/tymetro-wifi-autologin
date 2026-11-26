@@ -94,6 +94,8 @@ tools/extract_flow.py captures/<時間>/stream.log --redact   # 要寫進文件�
 - **TLS。** `wifiplususer.cht.com.tw` 只接受 `AES128-SHA256`。Homebrew Python 3.15 用的 OpenSSL 4.1 預設不接受，要 `set_ciphers("DEFAULT:@SECLEVEL=1")`；LibreSSL 不認得 `@SECLEVEL`，但預設就接受。
 - **HSTS。** `wifiad2.cht.com.tw` 送 `Strict-Transport-Security: …; includeSubdomains; preload`，登入視窗實際上也把 http 自動升成 https 了（錄到的網址都是 http 後面緊接著 https）。轉址的 `Location` 常常寫 http，script 跟瀏覽器一樣改成 https。
 - **User-Agent。** 閘道看到 macOS 偵測器的 UA（`CaptiveNetworkSupport-… wispr`）會回 WISPr XML，不會轉址。一定要用瀏覽器 UA。
+- **VPN、代理工具會讓 script 和使用者看到的結果不同。** 2026-11-26 晚上 Happ（xray，TUN 模式 `utun5`、`198.18.0.1`）從公司一路開到車上：系統預設路由和 `8.8.8.8` 都走 `utun5`，系統 DNS 還是公司內部的 `10.123.200.11`。script 綁著 Wi-Fi 網卡登入成功，使用者的 `mtr 8.8.8.8` 卻不通。判斷方法：`diag.txt` 的「系統預設路由」、`scutil --dns` 的 resolver #1 是不是 `utun`；`log show --predicate 'process == "nesessionmanager" AND eventMessage CONTAINS "status changed"'` 看哪個 VPN 何時連上。另外 TUN 代理通常不轉送 ICMP，`mtr`、`ping` 不能拿來判斷。
+- **系統 DNS 會卡住。** 同一次，script 剛連上時呼叫 `getaddrinfo` 卡了 8.5 分鐘（Wi-Fi 重連才放開）。現在一律經過 `system_resolve()` 限時 3 秒，整個登入也有 120 秒上限。`flow.txt` 每一步都有時間，看相鄰兩步的間隔就知道卡在哪。
 - **剛連上 Wi-Fi 的前幾秒還沒有 IP 或 DNS。** `wait_for_network()` 會重試 45 秒。
 - **scutil 的變化通知要接在 pty 上。** `scutil` 的 `n.watch` 輸出到 pipe 時會整塊緩衝，通知不會即時送出，所以 `network_events()` 用 `pty.openpty()`。一般使用者不能在 `State:` 底下發布測試用的 key（`Permission denied`），要測事件迴圈，可以暫時把 `WATCH_KEYS` 加上比較常變動的 `AirPort`。
 - **錄製相關。** zsh 有內建的 `log` 指令，要寫 `/usr/bin/log`。登入視窗載入的網址（`Probe request prepared for … URL:`）、WISPr 解析結果都是 debug 等級，只有 `log stream --level debug` 即時錄得到，事後 `log show` 看不到。

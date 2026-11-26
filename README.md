@@ -35,6 +35,8 @@ tail -f ~/Library/Logs/tymetro-wifi-autologin.log
 ## 注意
 
 - **手機熱點要關掉**（或把它的「自動加入」關掉）。macOS 發現 TyMetro 要登入、旁邊又有熱點可用時，會直接改連熱點，script 來不及登入。
+- **VPN、代理工具（例如 Happ 的 TUN 模式）在車上要關掉。** 它們會接管系統流量，script 綁著 Wi-Fi 網卡能登入成功，但其他程式都走 VPN，VPN 不通就全部不通。偵測到系統流量走 VPN（`utun`）時，script 會跳通知提醒。
+- 測網路請用 `curl -I https://www.google.com`。`mtr`、`ping` 用 ICMP，TUN 模式的代理通常不轉送，開著時一定不通。
 - 一次登入只對一台裝置有效，手機登入不會讓 Mac 也能上網。
 - 這不是官方工具。中華電信的入口網站改版後，script 可能會失效，修復方法見 [docs/maintenance/recording-portal-flow.md](docs/maintenance/recording-portal-flow.md)。
 

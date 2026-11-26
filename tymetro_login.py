@@ -30,6 +30,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -50,7 +51,10 @@ WATCH_KEYS = ("IPv4", "CaptiveNetwork")  # 常駐模式訂閱的 State:/Network/
 RUNS_DIR = os.path.expanduser("~/Library/Caches/tymetro-wifi-autologin/runs")
 TRACE_DIR = os.path.expanduser("~/Library/Caches/tymetro-wifi-autologin/traces")
 
+LOGIN_TIMEOUT = 120  # 一次登入最多花幾秒，超過就放棄、等下次重試
+
 IFACE = "en0"  # main() 會換成實際的 Wi-Fi 網卡
+DEADLINE = None  # login() 進行中時，超過這個時間就放棄
 DUMP = None    # 有設定時，每個 request 和頁面都存到這個目錄
 
 
@@ -155,10 +159,38 @@ def resolve(host):
             return ips[0]
         errors.append(f"{server}：沒有 A 紀錄")
     try:  # 已經登入時 macOS 的系統 DNS 也能用，DHCP 換了伺服器也查得到
-        return socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+        return system_resolve(host)
     except OSError as e:
         errors.append(f"系統 DNS：{e}")
     raise OSError(f"查不到 {host}（{'；'.join(errors)}）")
+
+
+def system_resolve(host, timeout=3):
+    """用 macOS 的系統 DNS 查。VPN（例如 Happ 的 TUN 模式）開著時，getaddrinfo 會卡住、沒有逾時，
+    實測卡過 8 分鐘，所以放在 thread 裡限時。"""
+    result = []
+
+    def work():
+        try:
+            result.append(socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0])
+        except OSError as e:
+            result.append(e)
+
+    threading.Thread(target=work, daemon=True).start()
+    deadline = time.time() + timeout
+    while not result and time.time() < deadline:
+        time.sleep(0.05)
+    if not result:
+        raise OSError(f"逾時 {timeout} 秒")
+    if isinstance(result[0], Exception):
+        raise result[0]
+    return result[0]
+
+
+def default_route_iface():
+    """系統（沒綁網卡的一般程式）的預設路由走哪張網卡。VPN 接管流量時會是 utunN。"""
+    m = re.search(r"interface: (\S+)", run(["/sbin/route", "-n", "get", "default"]))
+    return m.group(1) if m else None
 
 
 def wifi_connection(address, timeout=None, source_address=None, *args, **kwargs):
@@ -189,7 +221,7 @@ class Redirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urllib.parse.urlsplit(newurl).hostname == "wifiad2.cht.com.tw":
             newurl = re.sub(r"^http://", "https://", newurl)
-        dump("flow.txt", f"    {code} {req.full_url}\n     -> {newurl}\n")
+        dump("flow.txt", f"    {time.strftime('%H:%M:%S')} {code} {req.full_url}\n     -> {newurl}\n")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -220,6 +252,8 @@ _seq = 0
 def fetch(opener, url, data=None):
     """回傳 (status, 最後的網址, headers, body)。"""
     global _seq
+    if DEADLINE and time.time() > DEADLINE:
+        raise LoginError(f"登入超過 {LOGIN_TIMEOUT} 秒，放棄，稍後重試")
     body = urllib.parse.urlencode(data).encode() if data is not None else None
     try:
         resp = opener.open(url, data=body, timeout=TIMEOUT)
@@ -231,7 +265,7 @@ def fetch(opener, url, data=None):
         _seq += 1
         name = f"{_seq:02d}-" + re.sub(r"[^A-Za-z0-9.]+", "_", urllib.parse.urlsplit(final).hostname
                                         + urllib.parse.urlsplit(final).path)[:60] + ".html"
-        dump("flow.txt", f"{_seq:02d} {'POST' if data is not None else 'GET'} {url}\n"
+        dump("flow.txt", f"{_seq:02d} {time.strftime('%H:%M:%S')} {'POST' if data is not None else 'GET'} {url}\n"
                          f"   = {status} {final}  ({len(text)} bytes → {name})\n")
         dump(name, text)
     return status, final, headers, text
@@ -265,8 +299,17 @@ def wait_for_network(seconds=45):
 # 登入流程
 
 def login(start):
+    global DEADLINE
     if urllib.parse.urlsplit(start).hostname not in CHT_HOSTS:
         raise LoginError(f"被轉到的不是中華電信的登入頁，不處理：{start}")
+    DEADLINE = time.time() + LOGIN_TIMEOUT
+    try:
+        _login(start)
+    finally:
+        DEADLINE = None
+
+
+def _login(start):
     op = make_opener()
 
     # 1. 閘道 → wifiad2 同意頁（中間的 check.html 只是用 JS 檢查 cookie，直接跳過）
@@ -343,14 +386,15 @@ def notify(msg):
 def save_diag(reason):
     """檢查失敗時存一份網路狀態，事後才看得出是 DNS、路由還是閘道的問題。回傳檔案路徑。"""
     path = os.path.join(new_run_dir(), "diag.txt")
-    lines = [f"{time.strftime('%F %T')} {reason}", f"SSID：{current_ssid()}"]
+    lines = [f"{time.strftime('%F %T')} {reason}", f"SSID：{current_ssid()}",
+             f"系統預設路由：{default_route_iface() or '（沒有）'}"]
     for server in dns_servers():
         try:
             lines.append(f"DNS {server}：{dns_query('captive.apple.com', server)}")
         except OSError as e:
             lines.append(f"DNS {server}：{e or type(e).__name__}")
     try:
-        lines.append(f"系統 DNS：{socket.getaddrinfo('captive.apple.com', None, socket.AF_INET)[0][4][0]}")
+        lines.append(f"系統 DNS：{system_resolve('captive.apple.com')}")
     except OSError as e:
         lines.append(f"系統 DNS：{e}")
     packet = run(["/usr/sbin/ipconfig", "getpacket", IFACE])
@@ -460,7 +504,7 @@ def watch(ssids, trace=False):
     log(f"常駐中（網卡 {IFACE}），目標 Wi-Fi：{', '.join(ssids)}{'，錄系統紀錄' if trace else ''}")
     # timer：下次檢查的時間，None 表示只等網路事件。login_at：自己最後一次登入成功的時間。
     # 車上換基地台時 Wi-Fi 會斷線幾秒，但閘道的登入狀態還在，所以離開目標 Wi-Fi 時不清 login_at。
-    last_ssid, login_at, timer, why, failing = None, None, 0.0, "啟動", False
+    last_ssid, login_at, timer, why, failing, vpn_warned = None, None, 0.0, "啟動", False, False
 
     while True:
         if timer is not None and time.time() >= timer:
@@ -474,14 +518,20 @@ def watch(ssids, trace=False):
             else:
                 if ssid != last_ssid:
                     log(f"連上 {ssid}（{why}）")
-                    last_ssid = ssid
+                    last_ssid, vpn_warned = ssid, False
                 tracer.start()
                 try:
                     result = watch_check()
                     if result == "已登入":
                         login_at = time.time()
                     timer = next_check(login_at)
-                    log(f"檢查（{why}）：{result}，下次 {time.strftime('%H:%M:%S', time.localtime(timer))}")
+                    # script 自己綁著 Wi-Fi 網卡，VPN 開著時它能上網、其他程式卻不行，所以把系統的路由也記下來
+                    via = default_route_iface()
+                    note = "" if via == IFACE else f"；系統預設路由走 {via or '（沒有）'}"
+                    log(f"檢查（{why}）：{result}{note}，下次 {time.strftime('%H:%M:%S', time.localtime(timer))}")
+                    if via and via.startswith("utun") and not vpn_warned:
+                        notify(f"Wi-Fi 已登入，但系統網路走 {via}（VPN），一般程式可能不通")
+                        vpn_warned = True
                     failing = False
                 except (LoginError, urllib.error.URLError, OSError) as e:
                     timer = time.time() + RETRY
