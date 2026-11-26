@@ -9,8 +9,10 @@
 依序試，能解決就不用往下：
 
 1. **看自動登入留下的紀錄**（不用使用者配合）
-   - `~/Library/Logs/tymetro-wifi-autologin.log`：每次登入的步驟和失敗原因，例如「沒有看到「我已同意」頁，入口網站可能改版了」。
-   - `~/Library/Caches/tymetro-wifi-autologin/runs/<時間>/`：常駐模式每次登入都會存一份。`flow.txt` 第一行是閘道網址，後面是每個 request 和轉址；`NN-*.html` 是每一步拿到的頁面。最後一個檔案通常就是改版的那一頁。
+   - `~/Library/Logs/tymetro-wifi-autologin.log`：每次檢查（被什麼叫醒、結果、下次時間）、登入步驟和失敗原因，例如「沒有看到「我已同意」頁，入口網站可能改版了」。
+   - `~/Library/Caches/tymetro-wifi-autologin/runs/<時間>/`：常駐模式每次登入都會存一份。`flow.txt` 第一行是閘道網址，後面是每個 request 和轉址；`NN-*.html` 是每一步拿到的頁面。最後一個檔案通常就是改版的那一頁。檢查失敗（例如 DNS 查不到）時則是存 `diag.txt` 網路狀態快照。
+   - `~/Library/Caches/tymetro-wifi-autologin/traces/`：如果常駐程式是用 `./install.sh --trace` 裝的，這裡有在 TyMetro 上時錄的 macOS 登入偵測、登入視窗紀錄，等於自動做了第 1 節的錄製（不過是跟自動登入同時跑，看不到人手動點的流程）。用 `tools/extract_flow.py` 讀。
+   - 比對系統的登入狀態：`/usr/bin/log show --start '<開始>' --end '<結束>' --style compact --predicate 'subsystem == "com.apple.captive" AND process == "configd"'`，看 `Launching Websheet`、`Online (websheet: success)`、`deny-listing` 等。這些是 Default 等級，事後查得到。
 2. **用閘道網址重播**（要在 TyMetro 的 Wi-Fi 上，登入前或登入後都可以）
    ```sh
    python3 tymetro_login.py --start '<flow.txt 第一行的 gateway 網址>' --dump /tmp/replay

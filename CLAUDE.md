@@ -25,11 +25,16 @@ captures/             錄製輸出，不進 git
 ## 執行環境
 
 - LaunchAgent label：`io.github.justintw.tymetro-wifi-autologin`，plist 在 `~/Library/LaunchAgents/`，直接執行 repo 裡的 `tymetro_login.py --watch`，所以 `git pull` 後要 `launchctl kickstart -k gui/$UID/io.github.justintw.tymetro-wifi-autologin`（或重跑 `./install.sh`）才會生效
-- 紀錄檔：`~/Library/Logs/tymetro-wifi-autologin.log`
-- 每次登入的流程紀錄：`~/Library/Caches/tymetro-wifi-autologin/runs/<時間>/`（`flow.txt` + 每頁 HTML，留最近 10 份）
+- 紀錄檔：`~/Library/Logs/tymetro-wifi-autologin.log`。常駐模式在目標 Wi-Fi 上每次檢查都寫一行：`檢查（事件 IPv4 / 計時器 / 啟動）：可以上網 / 已登入，下次 HH:MM:SS`，失敗寫 `檢查（…）失敗：<原因>`，連上、離開目標 Wi-Fi 也會記
+- `~/Library/Caches/tymetro-wifi-autologin/runs/<時間>/`（兩種都算在「留最近 10 份」裡）：
+  - 每次登入的流程：`flow.txt`（第一行是閘道網址）+ 每頁 HTML
+  - 檢查失敗時的網路狀態快照：`diag.txt`（每台 DNS 伺服器、系統 DNS 的查詢結果、DHCP 資訊、CaptiveNetwork 狀態、`scutil --dns`、路由）。連續失敗只存第一次
+- `--trace`：在目標 Wi-Fi 上時用 `log stream --level debug` 錄 `com.apple.captive` 和 `com.apple.CaptiveNetworkAssistant`，存到 `~/Library/Caches/tymetro-wifi-autologin/traces/<時間>.log`，離開就停。可以直接丟給 `tools/extract_flow.py`
+- 登入時會用 `osascript` 跳 macOS 通知（正在登入、已登入、失敗），因為 macOS 自己的登入視窗會同時跳出來、停在同意頁，使用者會以為沒反應而自己去按
 - **常駐模式不輪詢**：`network_events()` 開一個 `scutil` 訂閱 `State:/Network/Interface/<網卡>/IPv4` 和 `.../CaptiveNetwork` 的變化，`watch()` 平常停在 `select()`，只有兩種情況會醒來：
   - 網路事件（連上、斷線、換網路、macOS 偵測到要登入）：讀 SSID，不是目標 Wi-Fi 就繼續睡，而且不設計時器
-  - 計時器（只在目標 Wi-Fi 上才有）：自己登入後睡到 30 分鐘到期（`SESSION`），之後每 20 秒檢查一次直到重登；不知道何時登入的（例如手動登入）每 60 秒檢查一次；失敗 30 秒後重試
+  - 計時器（只在目標 Wi-Fi 上才有，見 `next_check()`）：自己登入後睡到 30 分鐘到期（`SESSION`），到期後 10 分鐘內每 20 秒檢查一次直到重登；不知道何時登入的（例如手動登入）每 60 秒檢查一次；失敗 `RETRY` 秒（30）後重試
+  - 車上換基地台時 Wi-Fi 會斷線幾秒再連回，閘道的登入狀態還在，所以離開目標 Wi-Fi 時不清 `login_at`
 
 ## 改程式前要知道的
 

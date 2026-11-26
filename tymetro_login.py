@@ -5,6 +5,8 @@
   tymetro_login.py              登入一次
   tymetro_login.py --watch      常駐：連上 TyMetro-Train 就自動登入，30 分鐘到期後重登
                                 （LaunchAgent 跑的就是這個）
+  tymetro_login.py --watch --trace
+                                同上，另外在 TyMetro 上時錄下 macOS 登入視窗的系統紀錄（除錯用）
   tymetro_login.py --status     顯示 Wi-Fi 名稱、DNS、是否需要登入、被轉去的閘道網址
   tymetro_login.py --start URL --dump DIR
                                 從閘道網址重跑整個流程並存下每一頁（入口網站改版時除錯用）
@@ -43,8 +45,10 @@ TIMEOUT = 15
 IP_BOUND_IF = 25  # <netinet/in.h>：socket 只走指定網卡
 
 SESSION = 30 * 60  # 入口頁寫明看完廣告可用 30 分鐘
+RETRY = 30         # 檢查失敗後幾秒重試
 WATCH_KEYS = ("IPv4", "CaptiveNetwork")  # 常駐模式訂閱的 State:/Network/Interface/<網卡>/ 底下的 key
 RUNS_DIR = os.path.expanduser("~/Library/Caches/tymetro-wifi-autologin/runs")
+TRACE_DIR = os.path.expanduser("~/Library/Caches/tymetro-wifi-autologin/traces")
 
 IFACE = "en0"  # main() 會換成實際的 Wi-Fi 網卡
 DUMP = None    # 有設定時，每個 request 和頁面都存到這個目錄
@@ -140,15 +144,21 @@ def dns_query(name, server):
 def resolve(host):
     if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", host):
         return host
-    servers = dns_servers()
-    for server in servers:
+    errors = []
+    for server in dns_servers():
         try:
             ips = dns_query(host, server)
-        except OSError:
+        except OSError as e:
+            errors.append(f"{server}：{e or type(e).__name__}")
             continue
         if ips:
             return ips[0]
-    raise OSError(f"查不到 {host}（{IFACE} 的 DNS：{', '.join(servers) or '無'}）")
+        errors.append(f"{server}：沒有 A 紀錄")
+    try:  # 已經登入時 macOS 的系統 DNS 也能用，DHCP 換了伺服器也查得到
+        return socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+    except OSError as e:
+        errors.append(f"系統 DNS：{e}")
+    raise OSError(f"查不到 {host}（{'；'.join(errors)}）")
 
 
 def wifi_connection(address, timeout=None, source_address=None, *args, **kwargs):
@@ -324,24 +334,55 @@ def new_run_dir():
     return path
 
 
+def notify(msg):
+    """macOS 通知。登入時 macOS 自己的登入視窗也會跳出來、停在同意頁，不通知的話看起來像沒反應。"""
+    script = 'display notification "%s" with title "TyMetro Wi-Fi"' % msg.replace('"', "'")
+    subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True)
+
+
+def save_diag(reason):
+    """檢查失敗時存一份網路狀態，事後才看得出是 DNS、路由還是閘道的問題。回傳檔案路徑。"""
+    path = os.path.join(new_run_dir(), "diag.txt")
+    lines = [f"{time.strftime('%F %T')} {reason}", f"SSID：{current_ssid()}"]
+    for server in dns_servers():
+        try:
+            lines.append(f"DNS {server}：{dns_query('captive.apple.com', server)}")
+        except OSError as e:
+            lines.append(f"DNS {server}：{e or type(e).__name__}")
+    try:
+        lines.append(f"系統 DNS：{socket.getaddrinfo('captive.apple.com', None, socket.AF_INET)[0][4][0]}")
+    except OSError as e:
+        lines.append(f"系統 DNS：{e}")
+    packet = run(["/usr/sbin/ipconfig", "getpacket", IFACE])
+    lines += [l for l in packet.splitlines() if re.match(r"(router|domain_name_server|lease_time|server_identifier) ", l)]
+    lines += ["", run(["/usr/sbin/scutil"], f"show State:/Network/Interface/{IFACE}/CaptiveNetwork\n"),
+              run(["/usr/sbin/scutil", "--dns"])[:3000],
+              run(["/usr/sbin/netstat", "-rn", "-f", "inet"])[:2000]]
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    return path
+
+
 def watch_check():
-    """需要登入就登入。回傳 True 表示這次有登入，False 表示本來就能上網。"""
+    """需要登入就登入。回傳這次的結果（給紀錄用）。"""
     global DUMP
     online, start = wait_for_network(30)
     if online:
-        return False
+        return "可以上網"
     if not start:
         raise LoginError("偵測頁沒有被轉到登入頁")
     DUMP = new_run_dir()
     dump("flow.txt", f"gateway {start}\n")
     log(f"需要登入（流程紀錄：{DUMP}）")
+    notify("正在自動登入，登入視窗不用按")
     try:
         login(start)
         if not wait_for_network(15)[0]:
             raise LoginError("送出開通後仍然上不了網")
     finally:
         DUMP = None
-    return True
+    notify("已自動登入，可用 30 分鐘")
+    return "已登入"
 
 
 def network_events():
@@ -357,46 +398,103 @@ def network_events():
 
 
 def wait_event(fd, timeout):
-    """睡到網路有變化（回傳 True）或逾時（False）。一次變化常連發好幾個通知，多等 1 秒一起讀掉。"""
+    """睡到網路有變化或逾時。回傳變化的 key（例如 ["IPv4"]），逾時回傳 None。
+    一次變化常連發好幾個通知，多等 1 秒一起讀掉。"""
     ready = select.select([fd], [], [], timeout)[0]
     if not ready:
-        return False
+        return None
+    out = b""
     while ready:
-        if not os.read(fd, 4096):
+        data = os.read(fd, 4096)
+        if not data:
             raise OSError("scutil 結束了")
+        out += data
         ready = select.select([fd], [], [], 1)[0]
-    return True
+    keys = sorted({k.decode() for k in re.findall(rb"changedKey \[\d+\] = \S+/(\w+)", out)})
+    return keys or ["?"]
 
 
-def watch(ssids):
-    """平常停在 select() 不耗 CPU，只有網路事件或計時器到了才醒來。
-    計時器只在目標 Wi-Fi 上才設：登入後睡到 30 分鐘到期，之後每 20 秒看一次，直到重登。"""
+class Trace:
+    """--trace：在目標 Wi-Fi 上時，把 macOS 的登入偵測和登入視窗的 debug 紀錄錄到 TRACE_DIR，離開就停。
+    這些紀錄只有 log stream 即時錄得到，事後 log show 看不到。"""
+    PREDICATE = 'subsystem == "com.apple.captive" OR subsystem == "com.apple.CaptiveNetworkAssistant"'
+
+    def __init__(self, enabled):
+        self.enabled, self.proc = enabled, None
+
+    def start(self):
+        if not self.enabled or self.proc:
+            return
+        os.makedirs(TRACE_DIR, exist_ok=True)
+        for old in sorted(os.listdir(TRACE_DIR))[:-9]:
+            os.remove(os.path.join(TRACE_DIR, old))
+        path = os.path.join(TRACE_DIR, time.strftime("%Y%m%d-%H%M%S") + ".log")
+        self.proc = subprocess.Popen(
+            ["/usr/bin/log", "stream", "--level", "debug", "--style", "compact", "--predicate", self.PREDICATE],
+            stdout=open(path, "w"), stderr=subprocess.STDOUT)
+        log(f"開始錄系統紀錄：{path}")
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            self.proc = None
+            log("停止錄系統紀錄")
+
+
+def next_check(login_at):
+    """下次檢查的時間。"""
+    now = time.time()
+    if login_at and now < login_at + SESSION:
+        return login_at + SESSION + 5    # 自己登入的：睡到到期
+    if login_at and now < login_at + SESSION + 600:
+        return now + 20                  # 剛到期：密集一點看，盡快重登
+    return now + 60                      # 不知道何時登入的（例如手動登入）
+
+
+def watch(ssids, trace=False):
+    """平常停在 select() 不耗 CPU，只有網路事件或計時器到了才醒來。計時器只在目標 Wi-Fi 上才設。
+    每次檢查都寫一行紀錄：被什麼叫醒、結果、下次檢查時間。"""
     targets = {s.lower() for s in ssids}
     proc, events = network_events()
-    log(f"常駐中（網卡 {IFACE}），目標 Wi-Fi：{', '.join(ssids)}")
-    last_ssid, login_at, timer = None, None, 0.0  # timer：下次檢查的時間，None 表示等網路事件就好
+    tracer = Trace(trace)
+    log(f"常駐中（網卡 {IFACE}），目標 Wi-Fi：{', '.join(ssids)}{'，錄系統紀錄' if trace else ''}")
+    # timer：下次檢查的時間，None 表示只等網路事件。login_at：自己最後一次登入成功的時間。
+    # 車上換基地台時 Wi-Fi 會斷線幾秒，但閘道的登入狀態還在，所以離開目標 Wi-Fi 時不清 login_at。
+    last_ssid, login_at, timer, why, failing = None, None, 0.0, "啟動", False
 
     while True:
         if timer is not None and time.time() >= timer:
             ssid = current_ssid()
-            if not (ssid and ssid.lower() in targets):
-                last_ssid, login_at, timer = ssid, None, None
+            on_target = bool(ssid) and ssid.lower() in targets
+            if not on_target:
+                if last_ssid and last_ssid.lower() in targets:
+                    log(f"離開 {last_ssid}（{why}）")
+                    tracer.stop()
+                last_ssid, timer = ssid, None
             else:
                 if ssid != last_ssid:
-                    log(f"連上 {ssid}")
+                    log(f"連上 {ssid}（{why}）")
                     last_ssid = ssid
+                tracer.start()
                 try:
-                    if watch_check():
+                    result = watch_check()
+                    if result == "已登入":
                         login_at = time.time()
-                    if login_at and time.time() < login_at + SESSION:
-                        timer = login_at + SESSION + 5
-                    else:
-                        timer = time.time() + (20 if login_at else 60)
+                    timer = next_check(login_at)
+                    log(f"檢查（{why}）：{result}，下次 {time.strftime('%H:%M:%S', time.localtime(timer))}")
+                    failing = False
                 except (LoginError, urllib.error.URLError, OSError) as e:
-                    log(f"失敗：{e}，30 秒後再試")
-                    timer = time.time() + 30
-        if wait_event(events, None if timer is None else max(0.0, timer - time.time())):
-            timer = 0.0
+                    timer = time.time() + RETRY
+                    if not failing:
+                        log(f"網路狀態：{save_diag(str(e))}")
+                        notify(f"自動登入失敗：{e}")
+                    log(f"檢查（{why}）失敗：{e}，{RETRY} 秒後再試")
+                    failing = True
+        keys = wait_event(events, None if timer is None else max(0.0, timer - time.time()))
+        if keys:
+            timer, why = 0.0, "事件 " + ",".join(keys)
+        else:
+            why = "計時器"
 
 
 def status():
@@ -415,6 +513,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--watch", action="store_true", help="常駐，連上目標 Wi-Fi 就自動登入")
     ap.add_argument("--ssid", action="append", help=f"目標 Wi-Fi 名稱，可重複（預設 {DEFAULT_SSIDS[0]}）")
+    ap.add_argument("--trace", action="store_true", help="--watch 時，在目標 Wi-Fi 上順便錄 macOS 登入視窗的系統紀錄（除錯用）")
     ap.add_argument("--status", action="store_true", help="顯示目前狀態")
     ap.add_argument("--start", metavar="URL", help="從這個閘道網址開始（除錯、重播用）")
     ap.add_argument("--dump", metavar="DIR", help="把每個 request 和頁面存到 DIR（除錯用）")
@@ -430,7 +529,7 @@ def main():
     if args.status:
         status()
     elif args.watch:
-        watch(args.ssid or DEFAULT_SSIDS)
+        watch(args.ssid or DEFAULT_SSIDS, args.trace)
     else:
         try:
             run_once(args.start)

@@ -22,13 +22,15 @@ cd ~/workspace/github/JustinTW/tymetro-wifi-autologin
 
 ## 使用
 
-裝好就不用管。連上 TyMetro-Train 後，macOS 還是會跳出登入視窗，不用理它；script 登入後它應該會自己關掉，沒關就手動關。
+裝好就不用管。連上 TyMetro-Train 後，macOS 還是會跳出自己的登入視窗、停在「我已同意」頁，**不用按**：script 在背景登入，大約 20 秒（其中 6 秒是規定的廣告時間），會跳通知「正在自動登入」和「已自動登入」，登入完成後視窗應該會自己關掉。
 
 ```sh
 python3 tymetro_login.py --status   # 看目前連的 Wi-Fi、能不能上網
 python3 tymetro_login.py            # 手動登入一次
 tail -f ~/Library/Logs/tymetro-wifi-autologin.log
 ```
+
+除錯時可以加 `--trace` 重新安裝（`./install.sh --trace`），在 TyMetro 上時會另外錄下 macOS 登入視窗的系統紀錄到 `~/Library/Caches/tymetro-wifi-autologin/traces/`。
 
 ## 注意
 
